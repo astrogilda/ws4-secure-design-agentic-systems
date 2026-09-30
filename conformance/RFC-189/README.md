@@ -59,6 +59,7 @@ The reference verifier in the [agent-evidence-vectors](https://pypi.org/project/
 | 15 | matching interval IDs, but no expected commitment independently anchored for this invocation | `not_established` / `invocation_binding` | C5 |
 | 16 | complete observation, but write visibility declared for another invocation | `not_established` / `producer_capability_coverage` | C4, C5 |
 | 17 | complete observation, but no write visibility premise | `not_established` / `producer_capability_coverage` | C4 |
+| 18 | complete observation, but write visibility covers a narrower path than the claim | `not_established` / `producer_capability_coverage` | C4 |
 
 Cases 03, 04 and 05 are the reason naming a gap matters: in all three the checker reads valid records that name /srv/app/vendor/ as unobserved, and it reaches three different verdicts. The same record cannot support "nothing changed under /srv/app/", yet it fully supports "nothing changed under /srv/app/src/", and a write it did see still settles `fail`.
 
