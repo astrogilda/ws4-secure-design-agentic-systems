@@ -27,7 +27,8 @@ Three outcome axes are kept apart, as the #189 thread requires:
 - Each verdict carries the property and context used to reach it.
 
 Checker input is {property, evidence, context}. Context may carry an expected
-prior commitment anchored outside the presented record for this invocation.
+prior commitment and producer capability established outside the record for
+this invocation.
 The harness expectation is held outside the checker input and compared by
 run.py afterwards.
 """
@@ -54,6 +55,7 @@ OBSERVATION_VANTAGE = "observation_vantage"
 OBSERVATION_SCOPE = "observation_scope"
 ADMISSIBLE_OBSERVATION = "admissible_observation"
 INVOCATION_BINDING = "invocation_binding"
+PRODUCER_CAPABILITY_COVERAGE = "producer_capability_coverage"
 
 # A record the reference verifier finds coherent but whose own rules refuse its
 # claim (verdict `invalid`) is not a processing failure: the verification ran.
@@ -131,6 +133,22 @@ def _validate(checker_input: Any) -> None:
             "context.anchored_commitment_digest must be a 64-character lowercase "
             "hex digest when supplied"
         )
+    capability = ctx.get("producer_capability")
+    if capability is not None:
+        if not isinstance(capability, dict):
+            raise CandidateInputError("context.producer_capability must be an object")
+        if not isinstance(capability.get("claim_ref"), str) or not capability["claim_ref"]:
+            raise CandidateInputError(
+                "context.producer_capability.claim_ref must be a non-empty string"
+            )
+        paths = capability.get("visible_write_paths")
+        if not isinstance(paths, list) or not all(
+            isinstance(p, str) and p.startswith("/") for p in paths
+        ):
+            raise CandidateInputError(
+                "context.producer_capability.visible_write_paths must be a list "
+                "of absolute path prefixes"
+            )
 
 
 def _under(path: str, prefix: str) -> bool:
@@ -246,11 +264,30 @@ def _evaluate(checker_input: dict[str, Any]) -> dict[str, Any]:
             OBSERVATION_COVERAGE,
             f"the record names unobserved path(s) inside the property scope: {blind}",
         )
+    capability = ctx.get("producer_capability")
+    if capability is None:
+        return _not_established(
+            PRODUCER_CAPABILITY_COVERAGE,
+            "no write visibility was established for the evaluated invocation",
+        )
+    if capability["claim_ref"] != ctx["claim_ref"]:
+        return _not_established(
+            PRODUCER_CAPABILITY_COVERAGE,
+            "write visibility was established for a different invocation",
+        )
+    if any(
+        not any(_under(p, visible) for visible in capability["visible_write_paths"])
+        for p in scope
+    ):
+        return _not_established(
+            PRODUCER_CAPABILITY_COVERAGE,
+            "write visibility does not cover the evaluated path scope",
+        )
     return {
         "verdict": "pass",
         "unmet_obligation": None,
-        "reason": "no write observed inside the property scope, with complete "
-        "coverage of that scope for the interval, from an independent vantage",
+        "reason": "no write observed inside the property scope, with write visibility "
+        "and complete coverage for the interval from an independent vantage",
     }
 
 
@@ -264,6 +301,16 @@ def evaluate(checker_input: dict[str, Any]) -> dict[str, Any]:
             "claim_ref": ctx["claim_ref"],
             "observer_public_key": ctx["observer_public_key"],
             "anchored_commitment_digest": ctx.get("anchored_commitment_digest"),
+            "producer_capability": (
+                {
+                    "claim_ref": ctx["producer_capability"]["claim_ref"],
+                    "visible_write_paths": list(
+                        ctx["producer_capability"]["visible_write_paths"]
+                    ),
+                }
+                if ctx.get("producer_capability") is not None
+                else None
+            ),
         },
     }
     return result

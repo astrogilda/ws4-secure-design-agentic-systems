@@ -142,6 +142,52 @@ class Checker(unittest.TestCase):
         first_input["property"]["scope"].append("/elsewhere/")
         self.assertEqual(first["evaluation"]["property"]["scope"], ["/srv/app/"])
 
+    def test_no_write_visibility_cannot_establish_absence(self) -> None:
+        inp = self.base()
+        del inp["context"]["producer_capability"]
+        got = checker.evaluate(inp)
+        self.assertEqual(got["verdict"], "not_established")
+        self.assertEqual(
+            got["unmet_obligation"], checker.PRODUCER_CAPABILITY_COVERAGE
+        )
+
+    def test_narrower_write_visibility_cannot_cover_the_claim(self) -> None:
+        inp = self.base()
+        inp["context"]["producer_capability"]["visible_write_paths"] = [
+            "/srv/app/src/"
+        ]
+        got = checker.evaluate(inp)
+        self.assertEqual(got["verdict"], "not_established")
+        self.assertEqual(
+            got["unmet_obligation"], checker.PRODUCER_CAPABILITY_COVERAGE
+        )
+
+    def test_invalid_write_visibility_is_a_processing_error(self) -> None:
+        inp = self.base()
+        inp["context"]["producer_capability"]["visible_write_paths"] = "*"
+        with self.assertRaisesRegex(
+            checker.CandidateInputError, "visible_write_paths must be a list"
+        ):
+            checker.evaluate(inp)
+
+    def test_observed_write_can_fail_without_full_visibility(self) -> None:
+        inp = run.build_input(load("RFC189-OE-05-FAIL-WITNESS-DESPITE-GAP"))
+        del inp["context"]["producer_capability"]
+        self.assertEqual(checker.evaluate(inp)["verdict"], "fail")
+
+    def test_result_keeps_a_copy_of_capability_context(self) -> None:
+        inp = self.base()
+        got = checker.evaluate(inp)
+        inp["context"]["producer_capability"]["visible_write_paths"].append(
+            "/other/"
+        )
+        self.assertEqual(
+            got["evaluation"]["context"]["producer_capability"][
+                "visible_write_paths"
+            ],
+            ["/srv/app/"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

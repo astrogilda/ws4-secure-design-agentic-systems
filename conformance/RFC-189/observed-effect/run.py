@@ -56,6 +56,7 @@ def build_input(case: dict[str, Any]) -> dict[str, Any]:
             "anchored_commitment_digest": spec["context"].get(
                 "anchored_commitment_digest"
             ),
+            "producer_capability": spec["context"].get("producer_capability"),
         },
     }
 
@@ -79,6 +80,7 @@ def outcome(checker_input: dict[str, Any]) -> dict[str, Any]:
             "claim_ref": ctx["claim_ref"],
             "observer_public_key": ctx["observer_public_key"],
             "anchored_commitment_digest": ctx.get("anchored_commitment_digest"),
+            "producer_capability": ctx.get("producer_capability"),
         },
     }
     if result.get("evaluation") != expected_evaluation:
