@@ -42,6 +42,7 @@ run.py afterwards.
 from __future__ import annotations
 
 import base64
+import copy
 import json
 from typing import Any
 
@@ -52,7 +53,8 @@ PREDICATE_TYPE = (
 )
 NO_WRITE_IN_SCOPE = "no_write_in_scope"
 ACTION_OUTCOME = "action_outcome"
-SUPPORTED_PROPERTIES = frozenset({NO_WRITE_IN_SCOPE, ACTION_OUTCOME})
+OBSERVER_INDEPENDENCE = "observer_independence"
+SUPPORTED_PROPERTIES = frozenset({NO_WRITE_IN_SCOPE, ACTION_OUTCOME, OBSERVER_INDEPENDENCE})
 
 # Obligation names. `observation_coverage` is the name the #189 thread already
 # uses. `observation_vantage` is the agent-evidence-vocabulary term for who
@@ -64,6 +66,16 @@ OBSERVATION_SCOPE = "observation_scope"
 ADMISSIBLE_OBSERVATION = "admissible_observation"
 INVOCATION_BINDING = "invocation_binding"
 PRODUCER_CAPABILITY_COVERAGE = "producer_capability_coverage"
+
+# The independence test proposed for section 7.4 on #240: three conditions,
+# each established by evidence carried in or referenced from the record. The
+# order is the order the text lists them, and the first unmet one is named.
+INDEPENDENCE_CONDITIONS = (
+    ("trust_domain", "observer_trust_domain"),
+    ("identity_basis", "observer_identity_basis"),
+    ("key_control", "observer_key_control"),
+)
+_EVIDENCE_FIELDS = ("controlled_by", "established_by", "evidence_ref")
 
 # A record the reference verifier finds coherent but whose own rules refuse its
 # claim (verdict `invalid`) is not a processing failure: the verification ran.
@@ -159,6 +171,33 @@ def _validate(checker_input: Any) -> None:
             )
 
 
+def _validate_independence(ctx: dict[str, Any]) -> None:
+    producer = ctx.get("producer")
+    if not isinstance(producer, str) or not producer:
+        raise CandidateInputError(
+            "observer_independence requires context.producer: independence holds "
+            "between one observer and one named producer"
+        )
+    evidence = ctx.get("independence_evidence")
+    if not isinstance(evidence, dict):
+        raise CandidateInputError(
+            "observer_independence requires context.independence_evidence as an "
+            "object; an absent condition is an empty entry, not an absent object"
+        )
+    known = {name for name, _ in INDEPENDENCE_CONDITIONS}
+    unknown = sorted(set(evidence) - known)
+    if unknown:
+        raise CandidateInputError(f"unknown independence condition(s) {unknown}")
+    for name, entry in evidence.items():
+        if not isinstance(entry, dict):
+            raise CandidateInputError(f"independence_evidence.{name} must be an object")
+        for key, value in entry.items():
+            if key not in (*_EVIDENCE_FIELDS, "basis") or not isinstance(value, str):
+                raise CandidateInputError(
+                    f"independence_evidence.{name}.{key} is not a known string field"
+                )
+
+
 def _under(path: str, prefix: str) -> bool:
     return path == prefix or path.startswith(
         prefix if prefix.endswith("/") else prefix + "/"
@@ -184,6 +223,11 @@ def _evaluate(checker_input: dict[str, Any]) -> dict[str, Any]:
         raise UnsupportedVerification(
             f"property {prop['name']!r} is not implemented by this checker; "
             "no verification of the property was performed"
+        )
+    if prop["name"] == OBSERVER_INDEPENDENCE:
+        _validate_independence(checker_input["context"])
+        return _independence_verdict(
+            checker_input["context"], checker_input["evidence"]["envelope"]
         )
     verdict = _absence_verdict(
         prop["scope"], checker_input["context"], checker_input["evidence"]["envelope"]
@@ -214,10 +258,9 @@ def _action_outcome(verdict: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _absence_verdict(
-    scope: list[str], ctx: dict[str, Any], raw: bytes
-) -> dict[str, Any]:
-    """Decide "no write under `scope` during the evaluated interval"."""
+def _admit(raw: bytes, ctx: dict[str, Any]) -> dict[str, Any]:
+    """Admit the record through the reference verifier. Returns the predicate,
+    or a not_established result when the verifier refused the claim."""
     policy = observedeffect.Policy(
         predicate_type=PREDICATE_TYPE, observer_public_key=ctx["observer_public_key"]
     )
@@ -226,15 +269,75 @@ def _absence_verdict(
         raise MalformedEvidence(report.codes)
     if report.verdict == "invalid":
         code = report.codes[0] if report.codes else ""
-        return _not_established(
-            INVALID_CODE_OBLIGATION.get(code, ADMISSIBLE_OBSERVATION),
-            f"the reference verifier refused the record ({code}); a refused record "
-            "supports neither pass nor fail",
-        )
+        return {
+            "refused": _not_established(
+                INVALID_CODE_OBLIGATION.get(code, ADMISSIBLE_OBSERVATION),
+                f"the reference verifier refused the record ({code}); a refused "
+                "record supports neither pass nor fail",
+            )
+        }
     if report.verdict != "valid":
         raise CandidateInputError(f"unexpected admission verdict {report.verdict!r}")
+    return {"predicate": json.loads(base64.b64decode(json.loads(raw)["payload"]))["predicate"]}
 
-    pred = json.loads(base64.b64decode(json.loads(raw)["payload"]))["predicate"]
+
+def _independence_verdict(ctx: dict[str, Any], raw: bytes) -> dict[str, Any]:
+    """Decide "this record's observer is independent of the named producer for
+    this claim". Each condition needs an evidence entry that names who controls
+    the thing it is about, who established that, and where the evidence is. An
+    entry without `evidence_ref` is a declaration; an entry the producer
+    controls or established is the producer testifying about itself."""
+    admitted = _admit(raw, ctx)
+    if "refused" in admitted:
+        return admitted["refused"]
+    pred = admitted["predicate"]
+    if pred["intervalId"] != ctx["claim_ref"]:
+        return _not_established(
+            OBSERVATION_COVERAGE,
+            f"the record covers interval {pred['intervalId']!r}, not the evaluated "
+            f"claim {ctx['claim_ref']!r}; independence is recorded per claim",
+        )
+    vantage = pred["observation"]["vantage"]
+    if vantage != "below-observed":
+        return _not_established(
+            OBSERVATION_VANTAGE,
+            f"observation vantage is {vantage!r}; the record places the observer "
+            "inside the producer's reach, which fails the first condition",
+        )
+    producer = ctx["producer"]
+    evidence = ctx["independence_evidence"]
+    for name, obligation in INDEPENDENCE_CONDITIONS:
+        entry = evidence.get(name, {})
+        missing = [f for f in _EVIDENCE_FIELDS if not entry.get(f)]
+        if missing:
+            return _not_established(
+                obligation,
+                f"{name}: no evidence establishes this condition (missing {missing}); "
+                "a declaration does not establish independence",
+            )
+        held = [f for f in ("controlled_by", "established_by") if entry[f] == producer]
+        if held:
+            return _not_established(
+                obligation,
+                f"{name}: {held} is the producer {producer!r}; the producer cannot "
+                "establish its own observer's independence",
+            )
+    return {
+        "verdict": "pass",
+        "unmet_obligation": None,
+        "reason": "each independence condition is established by evidence that the "
+        "producer neither controls nor issued",
+    }
+
+
+def _absence_verdict(
+    scope: list[str], ctx: dict[str, Any], raw: bytes
+) -> dict[str, Any]:
+    """Decide "no write under `scope` during the evaluated interval"."""
+    admitted = _admit(raw, ctx)
+    if "refused" in admitted:
+        return admitted["refused"]
+    pred = admitted["predicate"]
     observation = pred["observation"]
 
     # Per-claim binding. Coverage established for one interval cannot establish
@@ -345,6 +448,12 @@ def evaluate(checker_input: dict[str, Any]) -> dict[str, Any]:
                     ),
                 }
                 if ctx.get("producer_capability") is not None
+                else None
+            ),
+            "producer": ctx.get("producer"),
+            "independence_evidence": (
+                copy.deepcopy(ctx["independence_evidence"])
+                if ctx.get("independence_evidence") is not None
                 else None
             ),
         },

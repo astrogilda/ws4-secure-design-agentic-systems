@@ -68,6 +68,8 @@ def build_input(case: dict[str, Any]) -> dict[str, Any]:
                 "anchored_commitment_digest"
             ),
             "producer_capability": spec["context"].get("producer_capability"),
+            "producer": spec["context"].get("producer"),
+            "independence_evidence": spec["context"].get("independence_evidence"),
         },
     }
 
@@ -92,6 +94,8 @@ def outcome(checker_input: dict[str, Any]) -> dict[str, Any]:
             "observer_public_key": ctx["observer_public_key"],
             "anchored_commitment_digest": ctx.get("anchored_commitment_digest"),
             "producer_capability": ctx.get("producer_capability"),
+            "producer": ctx.get("producer"),
+            "independence_evidence": ctx.get("independence_evidence"),
         },
     }
     if result.get("evaluation") != expected_evaluation:
@@ -100,11 +104,26 @@ def outcome(checker_input: dict[str, Any]) -> dict[str, Any]:
     return {axis: result[axis], "unmet_obligation": result["unmet_obligation"]}
 
 
+# The observer-independence cases are graded against the independence test
+# proposed for 7.4 on #240, as worded in the commit below, not against the
+# merged 7.4: that test is not merged text yet.
+AGAINST_INDEPENDENCE = {
+    "document": "whitepapers/agent-containment.md",
+    "section": "7.4",
+    "commit": "2d471d83d89069f9f01d295be113919960b5d31e",
+}
+PINS = {"RFC189-OE-": AGAINST, "RFC189-IND-": AGAINST_INDEPENDENCE}
+
+
 def check_pin(case: dict[str, Any]) -> None:
-    if case.get("status") != STATUS or case.get("against") != AGAINST:
+    case_id = case.get("id", "")
+    against = next((pin for pre, pin in PINS.items() if case_id.startswith(pre)), None)
+    if against is None:
+        raise ValueError(f"case id {case_id!r} belongs to no pinned case set")
+    if case.get("status") != STATUS or case.get("against") != against:
         raise ValueError(
-            f"case is not a {STATUS} case pinned to section {AGAINST['section']} "
-            f"at {AGAINST['commit'][:8]}"
+            f"case is not a {STATUS} case pinned to section {against['section']} "
+            f"at {against['commit'][:8]}"
         )
 
 

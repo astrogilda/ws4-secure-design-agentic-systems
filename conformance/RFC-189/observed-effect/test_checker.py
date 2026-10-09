@@ -318,6 +318,51 @@ def cases_changed_by(item: str) -> set[str]:
     return changed
 
 
+class ObserverIndependence(unittest.TestCase):
+    def base(self) -> dict[str, Any]:
+        return run.build_input(load("RFC189-IND-01-PASS-ATTESTED-IDENTITY"))
+
+    def test_a_missing_producer_is_an_input_error_not_a_verdict(self) -> None:
+        inp = self.base()
+        del inp["context"]["producer"]
+        with self.assertRaises(checker.CandidateInputError):
+            checker.evaluate(inp)
+
+    def test_an_absent_evidence_object_is_an_input_error(self) -> None:
+        inp = self.base()
+        inp["context"]["independence_evidence"] = None
+        with self.assertRaises(checker.CandidateInputError):
+            checker.evaluate(inp)
+
+    def test_an_unknown_condition_is_an_input_error(self) -> None:
+        inp = self.base()
+        inp["context"]["independence_evidence"]["measured_state"] = {}
+        with self.assertRaises(checker.CandidateInputError):
+            checker.evaluate(inp)
+
+    def test_each_condition_fails_alone_on_producer_control(self) -> None:
+        for name, obligation in checker.INDEPENDENCE_CONDITIONS:
+            for field in ("controlled_by", "established_by"):
+                inp = self.base()
+                inp["context"]["independence_evidence"][name][field] = inp["context"][
+                    "producer"
+                ]
+                with self.subTest(condition=name, field=field):
+                    got = checker.evaluate(inp)
+                    self.assertEqual(
+                        (got["verdict"], got["unmet_obligation"]),
+                        ("not_established", obligation),
+                    )
+
+    def test_each_condition_fails_alone_as_a_declaration(self) -> None:
+        for name, obligation in checker.INDEPENDENCE_CONDITIONS:
+            inp = self.base()
+            del inp["context"]["independence_evidence"][name]["evidence_ref"]
+            with self.subTest(condition=name):
+                got = checker.evaluate(inp)
+                self.assertEqual(got["unmet_obligation"], obligation)
+
+
 class OpenItemDependencies(unittest.TestCase):
     """A case's declared open-item dependencies are measured, not authored."""
 
